@@ -354,3 +354,110 @@
     )
   )
 )
+
+;; Withdraw collateral from position (if safely collateralized)
+(define-public (withdraw-collateral (btc-amount uint))
+  (begin
+    (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+    (asserts! (> btc-amount u0) ERR-INVALID-AMOUNT)
+    
+    ;; Get current BTC price with error handling
+    (let (
+      (btc-price (try! (get-current-price)))
+      (user tx-sender)
+    )
+      (begin
+        ;; Update interest accruals
+        (accrue-global-interest)
+        
+        ;; Update position with accrued interest
+        (let (
+          (updated-position (accrue-position-interest user))
+          (current-debt (get debt updated-position))
+          (current-collateral (get collateral updated-position))
+          (new-collateral (- current-collateral btc-amount))
+          (min-required-collateral (required-collateral current-debt btc-price))
+        )
+          (begin
+            ;; Validate withdrawal amount and remaining collateralization
+            (asserts! (<= btc-amount current-collateral) ERR-INSUFFICIENT-COLLATERAL)
+            (asserts! (>= (collateral-value new-collateral btc-price) min-required-collateral) 
+                     ERR-UNDERCOLLATERALIZED)
+            
+            ;; Update position
+            (map-set positions user {
+              collateral: new-collateral,
+              debt: current-debt,
+              last-update-block: stacks-block-height
+            })
+            
+            ;; Update protocol totals
+            (var-set total-collateral (- (var-get total-collateral) btc-amount))
+            
+            (ok true)
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Liquidate an undercollateralized position
+(define-public (liquidate-position (user principal))
+  (begin
+    (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+    (let (
+      (position (unwrap! (map-get? positions user) ERR-POSITION-NOT-FOUND))
+      (liquidator tx-sender)
+    )
+      (begin
+        (asserts! (not (is-eq user liquidator)) ERR-NOT-AUTHORIZED)
+        
+        ;; Get current BTC price with error handling
+        (let ((btc-price (try! (get-current-price))))
+          (begin
+            ;; Update interest accruals
+            (accrue-global-interest)
+            
+            ;; Update position with accrued interest
+            (let (
+              (updated-position (accrue-position-interest user))
+              (debt (get debt updated-position))
+              (collateral (get collateral updated-position))
+              (collateral-value-usd (collateral-value collateral btc-price))
+              (min-safety-value (/ (* debt LIQUIDATION-THRESHOLD) u100))
+            )
+              (begin
+                ;; Verify position is liquidatable
+                (asserts! (< collateral-value-usd min-safety-value) ERR-NOT-AUTHORIZED)
+                
+                ;; Liquidator pays back the debt
+                (try! (ft-burn? stable-usd debt liquidator))
+                
+                ;; Calculate liquidation penalty and distribute collateral
+                (let (
+                  (liquidation-bonus (/ (* collateral LIQUIDATION-PENALTY) u100))
+                  (liquidator-collateral (- collateral liquidation-bonus))
+                )
+                  (begin
+                    ;; Update protocol totals
+                    (var-set total-collateral (- (var-get total-collateral) collateral))
+                    (var-set total-debt (- (var-get total-debt) debt))
+                    
+                    ;; Remove liquidated position
+                    (map-delete positions user)
+                    
+                    ;; Add penalty to protocol fees
+                    (var-set stability-fee (+ (var-get stability-fee) liquidation-bonus))
+                    
+                    (ok true)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
