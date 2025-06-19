@@ -182,3 +182,85 @@
     )
   )
 )
+
+;;   PRICE ORACLE FUNCTIONS
+
+;; Get current BTC price with expiry validation
+(define-read-only (get-current-price)
+  (match (var-get btc-price-in-usd)
+    price-data (let (
+      (price (get price price-data))
+      (timestamp (get timestamp price-data))
+      (current-timestamp (var-get current-time))
+    )
+      (if (>= (- current-timestamp timestamp) PRICE_EXPIRY)
+        ERR-PRICE-EXPIRED
+        (if (<= price u0)
+          ERR-PRICE-EXPIRED
+          (ok price)
+        )
+      ))
+    ERR-NO-PRICE-DATA)
+)
+
+;; CORE PROTOCOL FUNCTIONS
+
+;; Create or expand a collateralized debt position
+(define-public (create-position (btc-amount uint) (stable-amount uint))
+  (begin
+    (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+    (asserts! (>= btc-amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= stable-amount MINIMUM_LOAN_AMOUNT) ERR-MINIMUM-LOAN-REQUIRED)
+    
+    ;; Get current BTC price with error handling
+    (let (
+      (btc-price (try! (get-current-price)))
+      (user tx-sender)
+      (existing-position (map-get? positions user))
+    )
+      (begin
+        ;; Update global interest accrual
+        (accrue-global-interest)
+        
+        ;; Handle existing position or create new one
+        (let (
+          (current-position 
+            (if (is-some existing-position)
+              (accrue-position-interest user)
+              {collateral: u0, debt: u0, last-update-block: stacks-block-height}
+            )
+          )
+        )
+          ;; Calculate new position totals
+          (let (
+            (old-collateral (get collateral current-position))
+            (old-debt (get debt current-position))
+            (new-collateral (+ old-collateral btc-amount))
+            (new-debt (+ old-debt stable-amount))
+            (min-required-collateral (required-collateral new-debt btc-price))
+          )
+            (begin
+              ;; Validate collateralization ratio
+              (asserts! (>= (collateral-value new-collateral btc-price) min-required-collateral) 
+                       ERR-INSUFFICIENT-COLLATERAL)
+              
+              ;; Update user position
+              (map-set positions user {
+                collateral: new-collateral,
+                debt: new-debt,
+                last-update-block: stacks-block-height
+              })
+              
+              ;; Update protocol totals
+              (var-set total-collateral (+ (var-get total-collateral) btc-amount))
+              (var-set total-debt (+ (var-get total-debt) stable-amount))
+              
+              ;; Mint stablecoins to user
+              (ft-mint? stable-usd stable-amount user)
+            )
+          )
+        )
+      )
+    )
+  )
+)
