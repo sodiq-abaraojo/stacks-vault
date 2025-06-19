@@ -264,3 +264,93 @@
     )
   )
 )
+
+;; Add additional collateral to existing position
+(define-public (add-collateral (btc-amount uint))
+  (let (
+    (user tx-sender)
+    (position (unwrap! (map-get? positions user) ERR-POSITION-NOT-FOUND))
+  )
+    (begin
+      (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+      (asserts! (> btc-amount u0) ERR-INVALID-AMOUNT)
+      
+      ;; Update interest accruals
+      (accrue-global-interest)
+      
+      ;; Update position with accrued interest
+      (let (
+        (updated-position (accrue-position-interest user))
+        (new-debt (get debt updated-position))
+        (current-collateral (get collateral updated-position))
+        (new-collateral (+ current-collateral btc-amount))
+      )
+        (begin
+          ;; Update position with additional collateral
+          (map-set positions user {
+            collateral: new-collateral,
+            debt: new-debt,
+            last-update-block: stacks-block-height
+          })
+          
+          ;; Update protocol totals
+          (var-set total-collateral (+ (var-get total-collateral) btc-amount))
+          
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+;; Repay debt and potentially close position
+(define-public (repay-debt (amount uint))
+  (let (
+    (user tx-sender)
+    (position (unwrap! (map-get? positions user) ERR-POSITION-NOT-FOUND))
+  )
+    (begin
+      (asserts! (not (var-get protocol-paused)) ERR-PROTOCOL-PAUSED)
+      (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+      
+      ;; Update interest accruals
+      (accrue-global-interest)
+      
+      ;; Update position with accrued interest
+      (let (
+        (updated-position (accrue-position-interest user))
+        (current-debt (get debt updated-position))
+        (collateral (get collateral updated-position))
+        (repay-amount (if (> amount current-debt) current-debt amount))
+        (new-debt (- current-debt repay-amount))
+      )
+        (begin
+          (asserts! (<= repay-amount current-debt) ERR-INSUFFICIENT-DEBT)
+          
+          ;; Burn stablecoins from user
+          (try! (ft-burn? stable-usd repay-amount user))
+          
+          ;; Update or close position
+          (if (is-eq new-debt u0)
+            ;; Full repayment - close position and return collateral
+            (begin
+              (map-delete positions user)
+              (var-set total-collateral (- (var-get total-collateral) collateral))
+            )
+            ;; Partial repayment - update position
+            (map-set positions user {
+              collateral: collateral,
+              debt: new-debt,
+              last-update-block: stacks-block-height
+            })
+          )
+          
+          ;; Update total debt
+          (var-set total-debt (- (var-get total-debt) repay-amount))
+          
+          (ok true)
+        )
+      )
+    )
+  )
+)
