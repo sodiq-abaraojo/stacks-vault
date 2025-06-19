@@ -82,3 +82,103 @@
     (ok (var-set protocol-paused paused))
   )
 )
+
+;; Update BTC price from oracle
+(define-public (update-btc-price (price uint) (timestamp uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get protocol-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (> price u0) ERR-INVALID-AMOUNT)
+    (var-set btc-price-in-usd (some {price: price, timestamp: timestamp}))
+    (ok true)
+  )
+)
+
+;; Set current time for testing
+(define-public (set-current-time (time uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get protocol-owner)) ERR-NOT-AUTHORIZED)
+    (ok (var-set current-time time))
+  )
+)
+
+;;   UTILITY FUNCTIONS
+
+;; Calculate USD value of BTC collateral
+(define-private (collateral-value (collateral-amount uint) (price uint))
+  (* collateral-amount price)
+)
+
+;; Calculate required collateral for a given debt amount
+(define-private (required-collateral (debt-amount uint) (price uint))
+  (/ (* debt-amount COLLATERAL-RATIO) (/ price u100))
+)
+
+;; Check if a position meets collateralization requirements
+(define-private (is-position-safe (user principal) (btc-price uint))
+  (let (
+    (position (unwrap! (map-get? positions user) false))
+    (debt (get debt position))
+    (collateral (get collateral position))
+    (collateral-value-usd (collateral-value collateral btc-price))
+    (min-collateral-value-usd (/ (* debt COLLATERAL-RATIO) u100))
+  )
+    (>= collateral-value-usd min-collateral-value-usd)
+  )
+)
+
+;; Calculate interest accrued over time
+(define-private (calculate-interest (debt uint) (blocks-passed uint))
+  (/ (* debt (* blocks-passed INTEREST_RATE_PER_BLOCK)) INTEREST_RATE_DENOMINATOR)
+)
+
+;; INTEREST ACCRUAL FUNCTIONS
+
+;; Accrue interest globally across all positions
+(define-private (accrue-global-interest)
+  (let (
+    (current-block stacks-block-height)
+    (last-block (var-get last-accrual-block))
+    (blocks-passed (- current-block last-block))
+    (total-system-debt (var-get total-debt))
+    (interest-accrued (calculate-interest total-system-debt blocks-passed))
+  )
+    (begin
+      (if (> blocks-passed u0)
+        (begin
+          (var-set stability-fee (+ (var-get stability-fee) interest-accrued))
+          (var-set total-debt (+ total-system-debt interest-accrued))
+          (var-set last-accrual-block current-block)
+        )
+        false
+      )
+      true
+    )
+  )
+)
+
+;; Accrue interest for a specific user position
+(define-private (accrue-position-interest (user principal))
+  (let (
+    (position (unwrap! (map-get? positions user) 
+                      {debt: u0, collateral: u0, last-update-block: stacks-block-height}))
+    (debt (get debt position))
+    (collateral (get collateral position))
+    (last-update (get last-update-block position))
+    (blocks-passed (- stacks-block-height last-update))
+    (interest-accrued (calculate-interest debt blocks-passed))
+    (new-debt (+ debt interest-accrued))
+    (updated-position {
+      collateral: collateral,
+      debt: new-debt,
+      last-update-block: stacks-block-height
+    })
+  )
+    (begin
+      (if (> blocks-passed u0)
+        (map-set positions user updated-position)
+        false
+      )
+      updated-position
+    )
+  )
+)
