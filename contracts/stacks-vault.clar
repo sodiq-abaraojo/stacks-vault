@@ -461,3 +461,48 @@
     )
   )
 )
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Get user position details
+(define-read-only (get-position (user principal))
+  (map-get? positions user)
+)
+
+;; Calculate collateralization ratio for a position
+(define-read-only (get-collateralization-ratio (user principal))
+  (match (map-get? positions user)
+    position (match (var-get btc-price-in-usd)
+      price-data (let (
+        (price (get price price-data))
+        (collateral (get collateral position))
+        (debt (get debt position))
+      )
+        (if (is-eq debt u0)
+          none
+          (some (/ (* (collateral-value collateral price) u100) debt))
+        ))
+      none)
+    none)
+)
+
+;; Get comprehensive protocol statistics
+(define-read-only (get-protocol-stats)
+  {
+    total-debt: (var-get total-debt),
+    total-collateral: (var-get total-collateral),
+    stability-fee: (var-get stability-fee),
+    protocol-paused: (var-get protocol-paused),
+    btc-price: (var-get btc-price-in-usd)
+  }
+)
+
+;; CONTRACT INITIALIZATION
+
+;; Initialize protocol with deployer as owner
+(define-private (set-contract-owner)
+  (var-set protocol-owner tx-sender)
+)
+
+;; Execute initialization
+(set-contract-owner)
